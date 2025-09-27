@@ -15,12 +15,10 @@ df = pd.read_csv("data/grid.csv")
 model = OutageModel()
 X_test, y_class_test, y_reg_test = model.train(df)
 
-# Predictions
 outage_probs, preds = model.predict(df)
 df["Outage_Prob"] = outage_probs
 df["Predicted_Customers"] = preds
 
-# --- Geocoding ---
 cache_file = "geo_cache.json"
 if os.path.exists(cache_file):
     with open(cache_file, "r") as f:
@@ -38,24 +36,20 @@ def geocode_area(area):
         if location:
             coord = (location.latitude, location.longitude)
             geo_cache[area] = coord
-            time.sleep(0.1)  # be gentle with API
+            time.sleep(0.1)
             return coord
     except:
         pass
-    # fallback to somewhere in the US if geocoding fails
     geo_cache[area] = (37.8, -95)
     return (37.8, -95)
 
 df["Latitude"], df["Longitude"] = zip(*df["Geographic Areas"].apply(geocode_area))
 
-# Save cache
 with open(cache_file, "w") as f:
     json.dump(geo_cache, f)
 
-# --- Scale for column height ---
 df["Elevation"] = df["Predicted_Customers"] / df["Predicted_Customers"].max() * 50000
 
-# --- Color function ---
 def outage_color(prob):
     if prob < 0.33:
         return [0, 255, 0, 160]
@@ -66,7 +60,6 @@ def outage_color(prob):
 
 df["Color"] = df["Outage_Prob"].apply(outage_color)
 
-# --- PyDeck ColumnLayer ---
 layer = pdk.Layer(
     "ColumnLayer",
     data=df,
