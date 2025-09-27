@@ -1,2 +1,2 @@
 # saviney
-epidemic simulator for shellhacks 2025
+Energy Grid Prediction Model
