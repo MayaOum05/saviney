@@ -16,21 +16,17 @@ class OutageModel:
         self.pipeline = None
 
     def preprocess(self, df):
-        # Datetime features
         df["Datetime Event Began"] = pd.to_datetime(df["Datetime Event Began"])
         df["hour"] = df["Datetime Event Began"].dt.hour
         df["weekday"] = df["Datetime Event Began"].dt.weekday
         df["month"] = df["Datetime Event Began"].dt.month
 
-        # Categorical and numeric features
         categorical = ["state_event", "Event Type", "state", "county"]
         numeric = ["duration", "min_customers", "max_customers", "hour", "weekday", "month"]
 
-        # Clean numeric columns
         for col in numeric:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-        # Target variable
         df["mean_customers"] = pd.to_numeric(df["mean_customers"], errors="coerce").fillna(0)
 
         X = df[categorical + numeric]
@@ -41,7 +37,6 @@ class OutageModel:
     def train(self, df):
         X, y, categorical, numeric = self.preprocess(df)
 
-        # Build preprocessing pipeline
         preprocessor = ColumnTransformer(
             transformers=[
                 ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
@@ -49,13 +44,11 @@ class OutageModel:
             ]
         )
 
-        # Create full pipeline
         self.pipeline = Pipeline(steps=[
             ("preprocessor", preprocessor),
             ("regressor", self.reg)
         ])
 
-        # Train/test split
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
