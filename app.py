@@ -1,80 +1,106 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
+import geopandas as gpd
+import plotly.express as px
 from model import OutageModel
-import numpy as np
-from geopy.geocoders import Nominatim
-import time
-import os
-import json
 
-st.title("Power Outage Prediction and Visualization")
+st.title("2023 Power Outage Predictions by Event Type")
 
-df = pd.read_csv("data/grid.csv")
+# Load outage dataset
+df = pd.read_csv("data/2023-outages.csv")
 
+# Load US counties shapefile (with name attributes)
+counties = gpd.read_file(
+    "https://www2.census.gov/geo/tiger/GENZ2022/shp/cb_2022_us_county_5m.zip"
+)
+
+# Ensure FIPS codes properly zero-padded
+df["fips"] = df["fips"].astype(str).str.zfill(5)
+counties["GEOID"] = counties["GEOID"].astype(str).str.zfill(5)
+
+# Extract centroids
+counties["Latitude"] = counties.geometry.centroid.y
+counties["Longitude"] = counties.geometry.centroid.x
+
+# You might also have a state shapefile or derive state names:
+# The county shapefile often includes “STATEFP” (state FIPS code).
+# To map state FIPS to state names, you can load a lookup table.
+state_fips_to_name = {
+    "01": "Alabama",
+    "02": "Alaska",
+    "04": "Arizona",
+    # ... include all state codes ...
+    "24": "Maryland",
+    # etc.
+}
+
+# Clean categorical columns in your outage df
+df["Event Type"] = df["Event Type"].astype(str).str.strip()
+df["county"] = df["county"].astype(str).str.strip()
+df["state"] = df["state"].astype(str).str.strip()
+
+# Event type filter
+event_types = sorted(df["Event Type"].unique())
+selected_event = st.selectbox("Select Event Type", event_types)
+
+# Filter the dataset
+event_df = df[df["Event Type"] == selected_event].copy()
+
+# Train and predict
 model = OutageModel()
-X_test, y_class_test, y_reg_test = model.train(df)
+X_test, y_test = model.train(event_df)
+event_df["Predicted_Customers"] = model.predict(event_df)
 
-outage_probs, preds = model.predict(df)
-df["Outage_Prob"] = outage_probs
-df["Predicted_Customers"] = preds
+# Aggregate per county (keeping fips for merge)
+county_df = event_df.groupby(["state", "county", "fips"], as_index=False).agg({
+    "Predicted_Customers": "mean",
+    "duration": "max"
+})
 
-cache_file = "geo_cache.json"
-if os.path.exists(cache_file):
-    with open(cache_file, "r") as f:
-        geo_cache = json.load(f)
-else:
-    geo_cache = {}
+# Define instability by duration
+unstable_duration_threshold = 15  # (seconds, or adjust based on correct unit)
+county_df["Unstable"] = county_df["duration"] > unstable_duration_threshold
 
-geolocator = Nominatim(user_agent="power_outage_app")
+# Merge with county shapefile to get names and centroids
+county_df = county_df.merge(
+    counties[["GEOID", "NAME", "STATEFP", "Latitude", "Longitude"]],
+    left_on="fips",
+    right_on="GEOID",
+    how="left"
+)
 
-def geocode_area(area):
-    if area in geo_cache:
-        return geo_cache[area]
-    try:
-        location = geolocator.geocode(area)
-        if location:
-            coord = (location.latitude, location.longitude)
-            geo_cache[area] = coord
-            time.sleep(0.1)
-            return coord
-    except:
-        pass
-    geo_cache[area] = (37.8, -95)
-    return (37.8, -95)
+# Rename columns for clarity
+county_df = county_df.rename(columns={
+    "NAME": "County_Name",
+    "STATEFP": "State_FIPS"
+})
 
-df["Latitude"], df["Longitude"] = zip(*df["Geographic Areas"].apply(geocode_area))
+# Map state FIPS to state names
+county_df["State_Name"] = county_df["State_FIPS"].map(state_fips_to_name)
 
-with open(cache_file, "w") as f:
-    json.dump(geo_cache, f)
+# Color function
+def outage_color(row):
+    return [255, 0, 0, 160] if row["Unstable"] else [0, 255, 0, 160]
 
-df["Elevation"] = df["Predicted_Customers"] / df["Predicted_Customers"].max() * 50000
+county_df["color"] = county_df.apply(outage_color, axis=1)
 
-def outage_color(prob):
-    if prob < 0.33:
-        return [0, 255, 0, 160]
-    elif prob < 0.66:
-        return [255, 255, 0, 160]
-    else:
-        return [255, 0, 0, 160]
-
-df["Color"] = df["Outage_Prob"].apply(outage_color)
-
+# Build PyDeck map
 layer = pdk.Layer(
     "ColumnLayer",
-    data=df,
+    data=county_df.dropna(subset=["Latitude", "Longitude"]),
     get_position=["Longitude", "Latitude"],
-    get_elevation="Elevation",
-    elevation_scale=1,
-    radius=40000,
-    get_fill_color="Color",
+    get_elevation="Predicted_Customers",
+    elevation_scale=0.5,
+    radius=20000,
+    get_fill_color="color",
     pickable=True,
     auto_highlight=True,
 )
 
 view_state = pdk.ViewState(
-    latitude=df["Latitude"].mean(),
-    longitude=df["Longitude"].mean(),
+    latitude=county_df["Latitude"].mean(),
+    longitude=county_df["Longitude"].mean(),
     zoom=4,
     pitch=45,
 )
@@ -82,10 +108,28 @@ view_state = pdk.ViewState(
 r = pdk.Deck(
     layers=[layer],
     initial_view_state=view_state,
-    tooltip={"text": "Area: {Geographic Areas}\nRegion: {NERC Region}\nOutage Probability: {Outage_Prob}\nPredicted Customers: {Predicted_Customers}"}
+    tooltip={
+        "text": "State: {State_Name}\nCounty: {County_Name}\nPredicted: {Predicted_Customers}\nUnstable: {Unstable}"
+    }
 )
 
 st.pydeck_chart(r)
 
-st.write("Predictions vs Actuals:")
-st.dataframe(df[["Geographic Areas", "Number of Customers Affected", "Predicted_Customers", "Outage_Prob"]])
+# State-level ranking with Plotly
+state_df = county_df.groupby("State_Name", as_index=False)["Predicted_Customers"].sum()
+state_df = state_df.sort_values("Predicted_Customers", ascending=False).dropna()
+
+st.subheader(f"State Rankings for {selected_event}")
+fig = px.bar(
+    state_df,
+    x="Predicted_Customers",
+    y="State_Name",
+    orientation="h",
+    title=f"Predicted Customers by State for {selected_event}",
+    labels={"Predicted_Customers": "Predicted Customers", "State_Name": "State"}
+)
+st.plotly_chart(fig, use_container_width=True)
+
+# Display county-level table
+st.write(f"Predicted Outages for {selected_event} (County Level)")
+st.dataframe(county_df[["State_Name", "County_Name", "Predicted_Customers", "duration", "Unstable"]])
