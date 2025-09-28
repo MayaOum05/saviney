@@ -5,3 +5,4 @@ plotly
 scikit-learn
 numpy
 shapely
+google-genai
