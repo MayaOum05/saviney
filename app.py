@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
-import geopandas as gpd
 import plotly.express as px
 from model import OutageModel
 from genai_utils import explain_grid_instability
@@ -9,17 +8,17 @@ from genai_utils import explain_grid_instability
 st.set_page_config(page_title="Energy Grid Stability Predictions", layout="wide")
 st.title("Energy Grid Stability Predictions")
 
+# Load outages dataset
 df = pd.read_csv("data/2023-outages.csv")
 
-counties = gpd.read_file(
-    "https://www2.census.gov/geo/tiger/GENZ2022/shp/cb_2022_us_county_5m.zip"
-)
+# Load preprocessed county centroids
+counties = pd.read_csv("data/us_county_centroids.csv")
 
+# Make sure FIPS codes are aligned
 df["fips"] = df["fips"].astype(str).str.zfill(5)
 counties["GEOID"] = counties["GEOID"].astype(str).str.zfill(5)
-counties["Latitude"] = counties.geometry.centroid.y
-counties["Longitude"] = counties.geometry.centroid.x
 
+# Map state FIPS codes to names
 state_fips_to_name = {
     "01": "Alabama","02": "Alaska","04": "Arizona","05": "Arkansas","06": "California",
     "08": "Colorado","09": "Connecticut","10": "Delaware","12": "Florida","13": "Georgia",
@@ -33,10 +32,12 @@ state_fips_to_name = {
     "54": "West Virginia","55": "Wisconsin","56": "Wyoming"
 }
 
+# Clean text fields
 df["Event Type"] = df["Event Type"].astype(str).str.strip()
 df["county"] = df["county"].astype(str).str.strip()
 df["state"] = df["state"].astype(str).str.strip()
 
+# Simplify event types
 event_mapping = {
     "Severe Weather": "Severe Weather",
     "Natural Disaster": "Severe Weather",
@@ -47,27 +48,26 @@ event_mapping = {
 }
 df["Event Simplified"] = df["Event Type"].map(event_mapping).fillna("Other")
 
-filters, main = st.columns([1, 3])
+# Sidebar filters
+event_types = sorted(df["Event Simplified"].unique())
+selected_event = st.sidebar.selectbox("Select Event Type", event_types)
+search_county = st.sidebar.text_input("Search County", "")
 
-with filters:
-    st.header("Filters")
-    event_types = sorted(df["Event Simplified"].unique())
-    selected_event = st.selectbox("Select Event Type", event_types)
-
-    all_counties = df["county"].unique()
-    search_county = st.text_input("Search County", "")
-
+# Filter dataset
 event_df = df[df["Event Simplified"] == selected_event].copy()
 
+# Train + predict
 model = OutageModel()
 X_test, y_test = model.train(event_df)
 event_df["Predicted_Customers"] = model.predict(event_df)
 
+# Aggregate to county level
 county_df = event_df.groupby(["state", "county", "fips"], as_index=False).agg({
     "Predicted_Customers": "mean",
     "duration": "max"
 })
 
+# Merge with centroids
 county_df = county_df.merge(
     counties[["GEOID", "NAME", "STATEFP", "Latitude", "Longitude"]],
     left_on="fips",
@@ -76,8 +76,13 @@ county_df = county_df.merge(
 )
 
 county_df = county_df.rename(columns={"NAME": "County_Name","STATEFP": "State_FIPS"})
-county_df["State_Name"] = county_df["State_FIPS"].map(state_fips_to_name)
 
+# Normalize State_FIPS -> always two digits
+county_df["State_FIPS"] = county_df["State_FIPS"].astype(str).str.zfill(2)
+county_df["State_Name"] = county_df["State_FIPS"].map(state_fips_to_name)
+county_df["State_Name"] = county_df["State_Name"].fillna("Unknown")
+
+# Classification
 def classify_grid(duration):
     if duration <= 15:
         return "Stable"
@@ -88,6 +93,7 @@ def classify_grid(duration):
 
 county_df["Grid_Status"] = county_df["duration"].apply(classify_grid)
 
+# Colors
 status_colors = {
     "Stable": [0, 200, 0, 180],
     "Unstable": [255, 200, 0, 180],
@@ -95,12 +101,13 @@ status_colors = {
 }
 county_df["color"] = county_df["Grid_Status"].map(status_colors)
 
+# Map layer
 layer = pdk.Layer(
     "ColumnLayer",
     data=county_df.dropna(subset=["Latitude", "Longitude"]),
     get_position=["Longitude", "Latitude"],
     get_elevation="Predicted_Customers",
-    elevation_scale=30,
+    elevation_scale=15,
     radius=20000,
     get_fill_color="color",
     pickable=True,
@@ -118,51 +125,53 @@ view_state = pdk.ViewState(
 r = pdk.Deck(
     layers=[layer],
     initial_view_state=view_state,
-    map_style="mapbox://styles/mapbox/light-v9",
+    map_style="light",
     tooltip={
         "text": "State: {State_Name}\nCounty: {County_Name}\nStatus: {Grid_Status}\nPredicted Customers: {Predicted_Customers}\nDuration: {duration} min"
     }
 )
 
-with main:
-    st.subheader(f"Map of {selected_event} Grid Impacts")
-    st.pydeck_chart(r)
+st.subheader(f"Map of {selected_event} Grid Impacts")
+st.pydeck_chart(r)
 
-    st.subheader(f"State Rankings and Generated Explainations for {selected_event}")
-    col1, col2 = st.columns([2, 1])
+col1, col2 = st.columns([2, 1])
 
-    with col1:
-        state_df = county_df.groupby(["State_Name", "Grid_Status"], as_index=False)["Predicted_Customers"].sum()
-        state_df = state_df.sort_values("Predicted_Customers", ascending=False).dropna()
-        fig = px.bar(
-            state_df,
-            x="Predicted_Customers",
-            y="State_Name",
-            color="Grid_Status",
-            orientation="h",
-            title=f"Predicted Customers by State and Status for {selected_event}",
-            labels={"Predicted_Customers": "Predicted Customers", "State_Name": "State"},
-            barmode="stack"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+with col1:
+    state_df = county_df.groupby(["State_Name", "Grid_Status"], as_index=False)["Predicted_Customers"].sum()
+    state_df = state_df.sort_values("Predicted_Customers", ascending=False).dropna()
 
-    with col2:
-        filtered_county_df = county_df.copy()
-        if search_county:
-            filtered_county_df = county_df[county_df["County_Name"].str.contains(search_county, case=False, na=False)]
+    st.subheader(f"State Rankings for {selected_event}")
+    fig = px.bar(
+        state_df,
+        x="Predicted_Customers",
+        y="State_Name",
+        color="Grid_Status",
+        orientation="h",
+        title=f"Predicted Customers by State and Status for {selected_event}",
+        labels={"Predicted_Customers": "Predicted Customers", "State_Name": "State"},
+        barmode="stack"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-        for _, row in filtered_county_df.iterrows():
-            st.markdown(f"**{row['County_Name']}, {row['State_Name']}**")
-            st.write(f"Predicted Customers: {row['Predicted_Customers']}")
-            st.write(f"Duration: {row['duration']} minutes")
-            st.write(f"Grid Status: {row['Grid_Status']}")
-            if row["Grid_Status"] != "Stable":
-                explanation = explain_grid_instability(
-                    county_name=row["County_Name"],
-                    state_name=row["State_Name"],
-                    predicted_customers=row["Predicted_Customers"],
-                    duration=row["duration"],
-                    event_type=selected_event
-                )
-                st.info(explanation)
-            st.markdown("---")
+with col2:
+    st.subheader(f"AI Explanations for {selected_event}")
+
+    filtered_county_df = county_df.copy()
+    if search_county:
+        filtered_county_df = county_df[county_df["County_Name"].str.contains(search_county, case=False, na=False)]
+
+    for _, row in filtered_county_df.iterrows():
+        st.markdown(f"**{row['County_Name']}, {row['State_Name']}**")
+        st.write(f"Predicted Customers: {row['Predicted_Customers']}")
+        st.write(f"Duration: {row['duration']} minutes")
+        st.write(f"Grid Status: {row['Grid_Status']}")
+        if row["Grid_Status"] != "Stable":
+            explanation = explain_grid_instability(
+                county_name=row["County_Name"],
+                state_name=row["State_Name"],
+                predicted_customers=row["Predicted_Customers"],
+                duration=row["duration"],
+                event_type=selected_event
+            )
+            st.write(f"Explanation: {explanation}")
+        st.markdown("---")
