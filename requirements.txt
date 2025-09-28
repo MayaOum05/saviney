@@ -1,5 +1,7 @@
-streamlit
+streamlit>=1.30
 pandas
-scikit-learn
 pydeck
 plotly
+scikit-learn
+numpy
+shapely
